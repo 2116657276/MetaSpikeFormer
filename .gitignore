@@ -1,0 +1,28 @@
+# Data (CIFAR-100 downloads)
+data/
+
+# Checkpoints (large model files)
+checkpoints/
+!checkpoints/.gitkeep
+
+# Training logs
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Claude config
+.claude/
+
+# macOS
+.DS_Store
+._*
+
+# IDE
+.vscode/
+.idea/
+
+# Conda
+*.egg-info/
