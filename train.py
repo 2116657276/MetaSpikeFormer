@@ -35,7 +35,6 @@ from spikingjelly.activation_based import functional, neuron
 
 from model import (
     MetaSpikeFormer,
-    meta_spikeformer_micro,
     meta_spikeformer_tiny,
     meta_spikeformer_cifar100,
 )
@@ -463,7 +462,7 @@ def main():
 
     # Model
     parser.add_argument('--model_size', type=str, default='tiny',
-                        choices=['micro', 'tiny', 'cifar100'],
+                        choices=['tiny', 'cifar100'],
                         help='Model size variant')
     parser.add_argument('--T', type=int, default=4,
                         help='SNN time steps')
@@ -569,9 +568,7 @@ def main():
         drop_rate=args.drop_rate,
         attn_drop_rate=args.attn_drop_rate,
     )
-    if args.model_size == 'micro':
-        model = meta_spikeformer_micro(**model_kwargs)
-    elif args.model_size == 'tiny':
+    if args.model_size == 'tiny':
         model = meta_spikeformer_tiny(**model_kwargs)
     else:
         model = meta_spikeformer_cifar100(**model_kwargs)

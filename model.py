@@ -547,42 +547,16 @@ class MetaSpikeFormer(nn.Module):
 #  Convenience builders
 # ---------------------------------------------------------------------------
 
-def meta_spikeformer_micro(**kwargs) -> MetaSpikeFormer:
-    """Micro variant for quick CPU pipeline verification (~0.2M params)."""
-    defaults = dict(
-        img_size=32,
-        in_channels=3,
-        num_classes=100,
-        embed_dims=(16, 32, 64, 128),
-        depths=(1, 1, 1, 1),
-        num_heads=(2, 4, 8, 16),
-        mlp_ratios=(2.0, 2.0, 2.0, 2.0),
-        T=4,
-        tau=2.0,
-        v_threshold=1.0,
-        drop_rate=0.0,
-        attn_drop_rate=0.0,
-        use_groupnorm=True,
-    )
-    defaults.update(kwargs)
-    return MetaSpikeFormer(**defaults)
-
-
 def meta_spikeformer_tiny(**kwargs) -> MetaSpikeFormer:
-    """Tiny variant for quick experiments (~1.7M params)."""
+    """Tiny: ~1.7M params. Verified on CIFAR-100 (29.4%) and HASYv2 (46.8%)."""
     defaults = dict(
-        img_size=32,
-        in_channels=3,
-        num_classes=100,
+        img_size=32, in_channels=3, num_classes=100,
         embed_dims=(32, 64, 128, 256),
         depths=(1, 2, 2, 1),
         num_heads=(2, 4, 8, 16),
         mlp_ratios=(4.0, 4.0, 4.0, 4.0),
-        T=4,
-        tau=2.0,
-        v_threshold=1.0,
-        drop_rate=0.0,
-        attn_drop_rate=0.0,
+        T=4, tau=2.0, v_threshold=0.3,
+        drop_rate=0.1, attn_drop_rate=0.1,
         use_groupnorm=True,
     )
     defaults.update(kwargs)
@@ -590,20 +564,15 @@ def meta_spikeformer_tiny(**kwargs) -> MetaSpikeFormer:
 
 
 def meta_spikeformer_cifar100(**kwargs) -> MetaSpikeFormer:
-    """Default CIFAR-100 Meta-SpikeFormer (~11.6M params)."""
+    """CIFAR-100 full model: ~11.6M params. For CUDA 4060 training."""
     defaults = dict(
-        img_size=32,
-        in_channels=3,
-        num_classes=100,
+        img_size=32, in_channels=3, num_classes=100,
         embed_dims=(64, 128, 256, 512),
         depths=(2, 2, 4, 2),
         num_heads=(4, 8, 16, 32),
         mlp_ratios=(4.0, 4.0, 4.0, 4.0),
-        T=4,
-        tau=2.0,
-        v_threshold=1.0,
-        drop_rate=0.0,
-        attn_drop_rate=0.0,
+        T=4, tau=2.0, v_threshold=0.3,
+        drop_rate=0.1, attn_drop_rate=0.1,
         use_groupnorm=True,
     )
     defaults.update(kwargs)
@@ -611,20 +580,31 @@ def meta_spikeformer_cifar100(**kwargs) -> MetaSpikeFormer:
 
 
 def meta_spikeformer_hasyv2(**kwargs) -> MetaSpikeFormer:
-    """HASYv2 variant: 1-channel grayscale input, 369 math symbol classes (~11.6M params)."""
+    """HASYv2 full model: ~13.3M params. Grayscale, 369 classes. For CUDA."""
     defaults = dict(
-        img_size=32,
-        in_channels=1,          # grayscale handwritten symbols
-        num_classes=369,        # LaTeX math symbol classes
+        img_size=32, in_channels=1, num_classes=369,
         embed_dims=(64, 128, 256, 512),
-        depths=(2, 2, 6, 2),   # deeper stage3 for 369 classes
+        depths=(2, 2, 6, 2),
         num_heads=(4, 8, 16, 32),
         mlp_ratios=(4.0, 4.0, 4.0, 4.0),
-        T=4,
-        tau=2.0,
-        v_threshold=0.3,
-        drop_rate=0.1,
-        attn_drop_rate=0.1,
+        T=4, tau=2.0, v_threshold=0.3,
+        drop_rate=0.1, attn_drop_rate=0.1,
+        use_groupnorm=True,
+    )
+    defaults.update(kwargs)
+    return MetaSpikeFormer(**defaults)
+
+
+def meta_spikeformer_hasyv2_narrow(**kwargs) -> MetaSpikeFormer:
+    """HASYv2 narrow: ~6.7M params. Efficient for Mac MPS, 10 blocks."""
+    defaults = dict(
+        img_size=32, in_channels=1, num_classes=369,
+        embed_dims=(48, 96, 192, 384),
+        depths=(2, 2, 4, 2),
+        num_heads=(4, 8, 16, 24),
+        mlp_ratios=(4.0, 4.0, 4.0, 4.0),
+        T=3, tau=2.0, v_threshold=0.3,
+        drop_rate=0.1, attn_drop_rate=0.1,
         use_groupnorm=True,
     )
     defaults.update(kwargs)

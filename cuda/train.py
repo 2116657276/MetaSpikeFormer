@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import argparse
 import torch
 
-from model import meta_spikeformer_micro, meta_spikeformer_tiny, meta_spikeformer_cifar100
+from model import meta_spikeformer_tiny, meta_spikeformer_cifar100
 from dataset import build_cifar100
 from train import train_one_epoch, evaluate, FiringRateMonitor, estimate_sops
 from train import estimate_memory, save_checkpoint, load_checkpoint
@@ -48,7 +48,7 @@ def get_args():
 
     # Model
     parser.add_argument('--model_size', type=str, default='cifar100',
-                        choices=['micro', 'tiny', 'cifar100'])
+                        choices=['tiny', 'cifar100'])
     parser.add_argument('--T', type=int, default=4, help='SNN time steps')
     parser.add_argument('--tau', type=float, default=2.0, help='LIF time constant')
     parser.add_argument('--v_threshold', type=float, default=0.3,
@@ -144,7 +144,7 @@ def main():
     model_kwargs = dict(T=args.T, tau=args.tau, v_threshold=args.v_threshold,
                         drop_rate=args.drop_rate, attn_drop_rate=args.attn_drop_rate,
                         use_groupnorm=True)
-    model_map = {'micro': meta_spikeformer_micro, 'tiny': meta_spikeformer_tiny,
+    model_map = {'tiny': meta_spikeformer_tiny,
                  'cifar100': meta_spikeformer_cifar100}
     model = model_map[args.model_size](**model_kwargs).to(device)
     functional.set_step_mode(model, 'm')

@@ -41,9 +41,9 @@ import torch.nn as nn
 
 from model import (
     MetaSpikeFormer,
-    meta_spikeformer_micro,
     meta_spikeformer_tiny,
     meta_spikeformer_hasyv2,
+    meta_spikeformer_hasyv2_narrow,
 )
 from dataset_hasyv2 import build_hasyv2, HASYV2_NUM_CLASSES
 from train import (
@@ -61,8 +61,8 @@ from spikingjelly.activation_based import functional, neuron
 def build_model(args):
     """Build and configure model for HASYv2 with memory optimizations."""
     model_map = {
-        'micro': meta_spikeformer_micro,
         'tiny': meta_spikeformer_tiny,
+        'narrow': meta_spikeformer_hasyv2_narrow,
         'hasyv2': meta_spikeformer_hasyv2,
     }
     builder = model_map[args.model_size]
@@ -75,11 +75,6 @@ def build_model(args):
         attn_drop_rate=args.attn_drop_rate,
         use_groupnorm=args.use_groupnorm,
     )
-
-    # Override num_classes and in_channels for non-hasyv2 models
-    if args.model_size != 'hasyv2':
-        model_kwargs['num_classes'] = HASYV2_NUM_CLASSES
-        model_kwargs['in_channels'] = 1
 
     model = builder(**model_kwargs)
     functional.set_step_mode(model, 'm')
@@ -107,8 +102,8 @@ def get_args():
                         help='dryrun=verify pipeline, quick=10K/3ep, half=75K/20ep, full=150K/50ep')
 
     # Model
-    parser.add_argument('--model_size', type=str, default='hasyv2',
-                        choices=['micro', 'tiny', 'hasyv2'])
+    parser.add_argument('--model_size', type=str, default='narrow',
+                        choices=['tiny', 'narrow', 'hasyv2'])
     parser.add_argument('--T', type=int, default=3,
                         help='SNN time steps (3 saves 25%% mem vs 4)')
     parser.add_argument('--tau', type=float, default=2.0)
@@ -143,6 +138,8 @@ def get_args():
     parser.add_argument('--save_every', type=int, default=5,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--resume', type=str, default='')
+    parser.add_argument('--early_stop', type=int, default=10,
+                        help='Stop if no val improvement for N epochs (0=disable)')
 
     # Data
     parser.add_argument('--data_root', type=str, default='./data')
@@ -151,41 +148,43 @@ def get_args():
 
     # ---- Apply presets ----
     if args.preset == 'dryrun':
-        args.model_size = 'micro'
+        args.model_size = 'tiny'
         args.epochs = 1
         args.batch_size = 4
         args.max_train_samples = 100
         args.max_val_samples = 50
         args.warmup_epochs = 0
         args.T = 3
-        print("🚀 Preset 'dryrun': micro, 1 batch verify")
+        print("🚀 dryrun: tiny, 1 batch verify")
     elif args.preset == 'quick':
-        args.model_size = 'micro'
-        args.epochs = 3
+        args.model_size = 'tiny'
+        args.epochs = 5
         args.batch_size = 16
         args.max_train_samples = 10000
         args.max_val_samples = 2000
         args.warmup_epochs = 1
         args.T = 3
-        print("🚀 Preset 'quick': micro, 3 epochs, 10K samples")
+        print("🚀 quick: tiny, 5 epochs, 10K samples")
     elif args.preset == 'half':
-        args.model_size = 'tiny'
-        args.epochs = 20
+        args.model_size = 'narrow'
+        args.epochs = 30
         args.batch_size = 16
         args.max_train_samples = 75000
         args.max_val_samples = 15000
         args.warmup_epochs = 3
         args.T = 3
-        print("🚀 Preset 'half': tiny, 20 epochs, 75K samples (50%%)")
+        args.early_stop = 8
+        print("🚀 half: narrow (6.7M), 30 epochs, 75K samples, early_stop=8")
     elif args.preset == 'full':
         args.model_size = 'hasyv2'
-        args.epochs = 50
+        args.epochs = 40
         args.batch_size = 16
-        args.max_train_samples = 0  # all
+        args.max_train_samples = 0
         args.max_val_samples = 0
         args.warmup_epochs = 5
         args.T = 3
-        print("🚀 Preset 'full': hasyv2 model, 50 epochs, all 150K samples")
+        args.early_stop = 10
+        print("🚀 full: hasyv2 (13.3M), 40 epochs, 151K samples, early_stop=10")
 
     return args
 
@@ -268,6 +267,8 @@ def main():
     print(f"\n=== Training ({args.epochs} epochs, {len(train_loader)} batches/epoch) ===")
     t_total_start = time.time()
 
+    no_improve_count = 0
+
     for epoch in range(start_epoch, args.epochs):
         scheduler.step(epoch)
         current_lr = scheduler.get_lr()
@@ -312,6 +313,15 @@ def main():
               f"Val: {val_metrics['loss']:.4f} {val_metrics['acc']:.2f}% | "
               f"FR: {avg_fr:.4f}{health_str} | SOPs: {sops:.2f}M | "
               f"Time: {epoch_time:.0f}s {'*' if is_best else ''}")
+
+        # Early stopping
+        if is_best:
+            no_improve_count = 0
+        else:
+            no_improve_count += 1
+        if args.early_stop > 0 and no_improve_count >= args.early_stop:
+            print(f"⚠ Early stop: no improvement for {no_improve_count} epochs")
+            break
 
     # ---- Done ----
     total_time = time.time() - t_total_start
