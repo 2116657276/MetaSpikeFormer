@@ -608,3 +608,24 @@ def meta_spikeformer_cifar100(**kwargs) -> MetaSpikeFormer:
     )
     defaults.update(kwargs)
     return MetaSpikeFormer(**defaults)
+
+
+def meta_spikeformer_hasyv2(**kwargs) -> MetaSpikeFormer:
+    """HASYv2 variant: 1-channel grayscale input, 369 math symbol classes (~11.6M params)."""
+    defaults = dict(
+        img_size=32,
+        in_channels=1,          # grayscale handwritten symbols
+        num_classes=369,        # LaTeX math symbol classes
+        embed_dims=(64, 128, 256, 512),
+        depths=(2, 2, 6, 2),   # deeper stage3 for 369 classes
+        num_heads=(4, 8, 16, 32),
+        mlp_ratios=(4.0, 4.0, 4.0, 4.0),
+        T=4,
+        tau=2.0,
+        v_threshold=0.3,
+        drop_rate=0.1,
+        attn_drop_rate=0.1,
+        use_groupnorm=True,
+    )
+    defaults.update(kwargs)
+    return MetaSpikeFormer(**defaults)

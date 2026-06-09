@@ -67,15 +67,31 @@ python cuda/train.py --model_size cifar100 --epochs 300 --batch_size 128
 | `warmup_epochs` | 3-10 | Essential for SNN training stability |
 | `tau` | 2.0 | LIF time constant (lower→faster decay→higher FR) |
 
-## Training Results (Mac M1 Pro)
+## Training Results
 
-| Run | Model | Data | Epochs | Best Val Acc | Key Changes |
-|-----|-------|------|--------|-------------|-------------|
+### CIFAR-100 (Mac M1 Pro)
+
+| Run | Model | Data | Epochs | Best Val | Key Changes |
+|-----|-------|------|--------|----------|-------------|
 | 1 | micro | 5K | 5 | 1.70% | v_th=1.0 (FR=3%) |
 | 2 | micro | 5K | 5 | 6.35% | v_th=0.3 |
 | 3 | micro | 10K | 6 | 1.75% | batch=32 (too large) |
 | 4 | tiny | 20K | 8 | 3.56% | lr=5e-4, wd=0.1 |
 | **5** | **tiny** | **25K** | **12** | **29.38%** | batch=16, lr=1e-3, dropout=0.1 |
+
+### HASYv2 Math Symbols (Mac M1 Pro)
+
+| Run | Model | Data | Epochs | Best Val | FR Start→End | Key Insight |
+|-----|-------|------|--------|----------|---------------|-------------|
+| quick | micro | 10K | 3 | 0.70% | 0.25→0.26 | model too small for 369 classes |
+| **half** | **tiny** | **75K** | **20** | **46.83%** | 0.25→0.035 | FR collapse limited late gains |
+
+**HASYv2 Best Config:**
+```bash
+python mac/train_hasyv2.py --preset half
+# tiny model, 75K samples, 20 epochs, T=3, v_th=0.3
+# Val: 46.83% (random baseline = 0.27%)
+```
 | 6* | tiny | 50K | 8/36 | 29.32% | Full data, ongoing |
 
 **Best configuration (Run 5):**
