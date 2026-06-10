@@ -78,7 +78,7 @@ def get_args():
     parser.add_argument('--max_val_samples', type=int, default=0)
 
     # Spike regularization (prevent dead neurons / FR collapse)
-    parser.add_argument('--lambda_sd', type=float, default=0.5,
+    parser.add_argument('--lambda_sd', type=float, default=3.0,
                         help='Spike density reg weight (0=disabled, v5: 0.5)')
     parser.add_argument('--lambda_mp', type=float, default=0.02,
                         help='Membrane potential reg weight (0=disabled, v5: 0.02)')
@@ -135,10 +135,10 @@ def get_args():
         args.warmup_epochs = 2
         args.early_stop_patience = 0
         args.save_every = 0
-        args.lambda_sd = 0.5
+        args.lambda_sd = 3.0
         args.lambda_mp = 0.02
         args.log_csv = './logs/hasyv2_dev.csv'
-        print("🔧 Dev: tiny model, 10 epochs, 5K train, bs=32, reg v5")
+        print("🔧 Dev: tiny model, 10 epochs, 5K train, bs=32, reg v6")
 
     # Apply quick_test preset
     if args.quick_test:
@@ -151,10 +151,10 @@ def get_args():
         args.warmup_epochs = 2
         args.early_stop_patience = 0
         args.save_every = 0
-        args.lambda_sd = 0.5
+        args.lambda_sd = 3.0
         args.lambda_mp = 0.02
         args.log_csv = './logs/hasyv2_tiny_test.csv'
-        print("🧪 Quick test: tiny model, 10 epochs, 10K train, reg v5")
+        print("🧪 Quick test: tiny model, 10 epochs, 10K train, reg v6")
 
     # Apply full training preset
     if args.full:
@@ -167,10 +167,10 @@ def get_args():
         args.warmup_epochs = 5
         args.early_stop_patience = 15
         args.save_every = 5
-        args.lambda_sd = 0.5
+        args.lambda_sd = 3.0
         args.lambda_mp = 0.02
-        args.log_csv = './logs/hasyv2_cuda_narrow_v5.csv'
-        print("🚀 Full training: narrow model (6.7M), 50 epochs, 151K data, reg v5")
+        args.log_csv = './logs/hasyv2_cuda_narrow_v6.csv'
+        print("🚀 Full training: narrow model (6.7M), 50 epochs, 151K data, reg v6")
 
     # Compute effective batch
     args.eff_batch = args.batch_size

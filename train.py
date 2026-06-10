@@ -141,7 +141,8 @@ def compute_spike_reg_loss(
 
     if lif_count > 0:
         mp_loss = mp_loss / lif_count
-        sd_loss = sd_loss / lif_count
+        # sd_loss is summed across layers, NOT averaged — each dead layer
+        # must contribute directly to the gradient (v6: fix dilution)
 
     return sd_loss, mp_loss
 
