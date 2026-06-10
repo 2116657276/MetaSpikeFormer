@@ -27,6 +27,10 @@ from pathlib import Path
 # Allow importing from project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Ensure progress prints are visible when stdout is redirected
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)  # Python 3.7+
+
 import argparse
 import torch
 
@@ -35,7 +39,7 @@ from dataset import build_cifar100
 from train import train_one_epoch, evaluate, FiringRateMonitor, estimate_sops
 from train import estimate_memory, save_checkpoint, load_checkpoint
 from train import WarmupCosineScheduler, analyze_batch_records
-from spikingjelly.activation_based import functional, neuron
+from spikingjelly.activation_based import functional
 
 
 def get_args():
@@ -78,10 +82,6 @@ def get_args():
     parser.add_argument('--num_workers', type=int, default=4,
                         help='CUDA: use 4+ for data loading')
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--use_amp', action='store_true', default=True,
-                        help='Use Automatic Mixed Precision (recommended)')
-    parser.add_argument('--no_amp', action='store_true',
-                        help='Disable AMP')
 
     # Logging
     parser.add_argument('--log_csv', type=str, default='./logs/cuda_training.csv')
@@ -128,7 +128,6 @@ def main():
     if device.type == 'cuda':
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
         print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-        print(f"  AMP: {'enabled' if args.use_amp and not args.no_amp else 'disabled'}")
 
     # Data
     print("Loading CIFAR-100...")
@@ -167,12 +166,6 @@ def main():
     print(f"Model: {args.model_size}, {n_params/1e6:.2f}M params, T={args.T}")
     print(f"Estimated memory: ~{mem['total_mb']:.0f}MB")
 
-    # AMP scaler
-    use_amp = args.use_amp and not args.no_amp and device.type == 'cuda'
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
-    if use_amp:
-        print("AMP scaler initialized")
-
     # Monitor
     fr_monitor = FiringRateMonitor(model)
     print(f"FR monitor: {len(fr_monitor.hooks)} LIF nodes")
@@ -195,7 +188,7 @@ def main():
     if csv_file:
         csv_file.write('epoch,batch,loss,acc,lr,grad_norm,fr\n')
 
-    def batch_logger(epoch, batch_idx, loss, acc, lr, grad_norm, fr):
+    def batch_logger(epoch, batch_idx, loss, acc, lr, grad_norm, fr, **_kw):
         if csv_file:
             csv_file.write(f'{epoch},{batch_idx},{loss:.6f},{acc:.4f},{lr:.8f},{grad_norm:.4f},{fr:.6f}\n')
         batch_records.append({'epoch': epoch, 'batch': batch_idx, 'loss': loss,

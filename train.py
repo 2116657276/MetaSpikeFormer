@@ -25,7 +25,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -94,6 +94,56 @@ class FiringRateMonitor:
         for h in self.hooks:
             h.remove()
         self.hooks.clear()
+
+
+# ---------------------------------------------------------------------------
+#  Spike Regularization Loss (prevent dead / bursting neurons)
+# ---------------------------------------------------------------------------
+
+def compute_spike_reg_loss(
+    model: nn.Module,
+    target_fr_min: float = 0.10,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute spike + membrane potential regularization loss.
+
+    - sd_loss: penalises FR below target_fr_min (differentiable via surrogate).
+    - mp_loss: penalises negative membrane potential (prevents neuron death).
+
+    Returns (sd_loss, mp_loss) as scalar tensors.
+    """
+    mp_loss = None
+    sd_loss = None
+    lif_count = 0
+
+    for m in model.modules():
+        if not isinstance(m, neuron.LIFNode):
+            continue
+        lif_count += 1
+
+        # Membrane potential — differentiable, guides V toward healthy range
+        if hasattr(m, 'v') and m.v is not None:
+            term = (torch.relu(-m.v) ** 2).mean()  # punish V < 0
+            mp_loss = term if mp_loss is None else mp_loss + term
+
+        # Spike density — differentiable via surrogate gradient (ATan)
+        if hasattr(m, 'spike') and m.spike is not None:
+            spike_mean = m.spike.float().mean()               # gradient flows!
+            if spike_mean < target_fr_min:
+                term = (target_fr_min - spike_mean) ** 2
+                sd_loss = term if sd_loss is None else sd_loss + term
+
+    # Fallback for no LIF nodes
+    if mp_loss is None:
+        mp_loss = torch.tensor(0.0)
+    if sd_loss is None:
+        sd_loss = torch.tensor(0.0)
+
+    if lif_count > 0:
+        mp_loss = mp_loss / lif_count
+        sd_loss = sd_loss / lif_count
+
+    return sd_loss, mp_loss
 
 
 # ---------------------------------------------------------------------------
@@ -241,20 +291,28 @@ def train_one_epoch(
     dry_run: bool = False,
     batch_logger = None,  # callback(epoch, batch_idx, loss, acc, lr, grad_norm, fr)
     grad_accum_steps: int = 1,  # gradient accumulation steps
+    lambda_sd: float = 0.0,     # spike density reg weight (0=disabled)
+    lambda_mp: float = 0.0,     # membrane potential reg weight (0=disabled)
+    target_fr_min: float = 0.10,
 ) -> Dict[str, float]:
     """
-    Train one epoch with optional gradient accumulation.
+    Train one epoch with optional gradient accumulation + spike regularization.
 
     When grad_accum_steps > 1, gradients are accumulated over that many
     micro-batches before calling optimizer.step().  This simulates a larger
     effective batch size without the VRAM cost:
         effective_batch = batch_size × grad_accum_steps
 
-    Loss is scaled by 1/grad_accum_steps so the gradient magnitude matches
-    the effective batch size.
+    Spike regularization (when lambda_sd > 0 or lambda_mp > 0):
+    - Membrane potential loss: pushes V toward target_v (prevents saturation).
+    - Spike density loss: penalises FR outside [target_fr_min, target_fr_max].
     """
     model.train()
+    use_reg = (lambda_sd > 0 or lambda_mp > 0)
     running_loss = 0.0
+    running_ce = 0.0
+    running_sd = 0.0
+    running_mp = 0.0
     correct = 0
     total = 0
     current_lr = optimizer.param_groups[0]['lr']
@@ -273,9 +331,19 @@ def train_one_epoch(
         if images.dim() == 4:
             images = images.unsqueeze(0).repeat(model.T, 1, 1, 1, 1)
 
-        # Forward — scale loss for gradient accumulation
+        # Forward
         logits = model(images)
-        loss = criterion(logits, labels) / grad_accum_steps
+        ce_loss = criterion(logits, labels)
+
+        # Spike regularization (computed BEFORE reset_net — needs v/spike state)
+        sd_loss = torch.tensor(0.0, device=device)
+        mp_loss = torch.tensor(0.0, device=device)
+        if use_reg:
+            sd_loss, mp_loss = compute_spike_reg_loss(
+                model, target_fr_min=target_fr_min)
+            # mp_loss flows gradients through V; sd_loss is detached inside
+
+        loss = (ce_loss + lambda_sd * sd_loss.to(device) + lambda_mp * mp_loss.to(device)) / grad_accum_steps
 
         # Backward (accumulate gradients)
         loss.backward()
@@ -285,6 +353,10 @@ def train_one_epoch(
 
         # Stats (use unscaled loss for reporting)
         running_loss += loss.item() * grad_accum_steps
+        running_ce += ce_loss.item()
+        if use_reg:
+            running_sd += sd_loss.item()
+            running_mp += mp_loss.item()
         _, predicted = logits.max(1)
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
@@ -309,7 +381,10 @@ def train_one_epoch(
                 fr = fr_monitor.get_avg_firing_rate() if fr_monitor else 0.0
                 batch_acc_val = predicted.eq(labels).sum().item() / labels.size(0) * 100.0
                 batch_logger(epoch, batch_idx, loss.item() * grad_accum_steps,
-                           batch_acc_val, current_lr, total_norm, fr)
+                           batch_acc_val, current_lr, total_norm, fr,
+                           ce_loss=ce_loss.item(),
+                           sd_loss=sd_loss.item(),
+                           mp_loss=mp_loss.item())
 
             accum_step = 0
         else:
@@ -318,7 +393,10 @@ def train_one_epoch(
                 fr = fr_monitor.get_avg_firing_rate() if fr_monitor else 0.0
                 batch_acc_val = predicted.eq(labels).sum().item() / labels.size(0) * 100.0
                 batch_logger(epoch, batch_idx, loss.item() * grad_accum_steps,
-                           batch_acc_val, current_lr, 0.0, fr)
+                           batch_acc_val, current_lr, 0.0, fr,
+                           ce_loss=ce_loss.item(),
+                           sd_loss=sd_loss.item(),
+                           mp_loss=mp_loss.item())
 
         if dry_run and batch_idx == 0:
             print(f"  Dry-run batch {batch_idx+1}: loss={loss.item() * grad_accum_steps:.4f}, "
@@ -344,6 +422,9 @@ def train_one_epoch(
     return {
         'loss': running_loss / n_batches,
         'acc': 100.0 * correct / total,
+        'ce_loss': running_ce / n_batches,
+        'sd_loss': running_sd / n_batches,
+        'mp_loss': running_mp / n_batches,
     }
 
 

@@ -595,6 +595,22 @@ def meta_spikeformer_hasyv2(**kwargs) -> MetaSpikeFormer:
     return MetaSpikeFormer(**defaults)
 
 
+def meta_spikeformer_hasyv2_tiny(**kwargs) -> MetaSpikeFormer:
+    """HASYv2 tiny: ~0.8M params. Grayscale, fast iteration / dry-run."""
+    defaults = dict(
+        img_size=32, in_channels=1, num_classes=369,
+        embed_dims=(24, 48, 96, 192),
+        depths=(1, 1, 2, 1),
+        num_heads=(2, 4, 8, 12),
+        mlp_ratios=(4.0, 4.0, 4.0, 4.0),
+        T=2, tau=6.0, v_threshold=0.15,
+        drop_rate=0.05, attn_drop_rate=0.1,
+        use_groupnorm=True,
+    )
+    defaults.update(kwargs)
+    return MetaSpikeFormer(**defaults)
+
+
 def meta_spikeformer_hasyv2_narrow(**kwargs) -> MetaSpikeFormer:
     """HASYv2 narrow: ~6.7M params. Efficient for Mac MPS, 10 blocks."""
     defaults = dict(

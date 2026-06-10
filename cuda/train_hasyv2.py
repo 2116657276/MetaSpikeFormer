@@ -5,19 +5,16 @@ Optimized for NVIDIA RTX 4060 (8GB VRAM) on WSL/Ubuntu.
 
 HASYv2: 369 classes, ~168K grayscale 32x32 images.
 
-Key CUDA optimizations (v3, learned from v1 crash + v2 analysis):
-  - narrow model (6.7M) — best fit for 8GB VRAM
-  - T=3 — sufficient for grayscale, saves 25% memory vs T=4
-  - batch_size=16 — small batch → gradient noise → better SNN generalization
-  - tau=6.0 — high tau prevents FR collapse (v1 died at tau=2.0)
-  - v_threshold=0.15 — lower threshold = easier firing = healthier FR
-  - min_lr=1e-4 — high floor prevents neuron starvation in late stages
-  - grad_clip=0.5 — tighter clip matches small-batch variance
-  - full dataset (151K) — more data = better generalization
+Key features (v4):
+  - Spike density + membrane potential regularization (prevents FR collapse)
+  - Three model sizes: tiny (1.0M), narrow (6.7M), hasyv2 (13.3M)
+  - tau=6.0, v_threshold=0.15 — proven healthy FR settings
+  - grad_clip=0.5, min_lr=1e-4 — stability guards
   - Strict VRAM guard: <7GB target
 
 Usage:
-  python cuda/train_hasyv2.py
+  python cuda/train_hasyv2.py --quick_test    # tiny model, 5 epoch, 10K data
+  python cuda/train_hasyv2.py --full           # narrow model, 50 epoch, 151K data
 """
 
 import sys
@@ -26,26 +23,29 @@ from pathlib import Path
 # Allow importing from project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Ensure progress prints are visible when stdout is redirected
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)  # Python 3.7+
+
 import argparse
 import time
 import json
-import os
 
 import torch
 import torch.nn as nn
 
 from model import (
-    meta_spikeformer_tiny,
     meta_spikeformer_hasyv2,
     meta_spikeformer_hasyv2_narrow,
+    meta_spikeformer_hasyv2_tiny,
 )
-from dataset_hasyv2 import build_hasyv2, HASYV2_NUM_CLASSES
+from dataset_hasyv2 import build_hasyv2
 from train import (
     train_one_epoch, evaluate, FiringRateMonitor, estimate_sops,
     estimate_memory, save_checkpoint, load_checkpoint,
     WarmupCosineScheduler, analyze_batch_records,
 )
-from spikingjelly.activation_based import functional, neuron
+from spikingjelly.activation_based import functional
 
 
 # ---------------------------------------------------------------------------
@@ -77,14 +77,30 @@ def get_args():
                         help='0=use all available (151K)')
     parser.add_argument('--max_val_samples', type=int, default=0)
 
+    # Spike regularization (prevent dead neurons / FR collapse)
+    parser.add_argument('--lambda_sd', type=float, default=0.5,
+                        help='Spike density reg weight (0=disabled, v5: 0.5)')
+    parser.add_argument('--lambda_mp', type=float, default=0.02,
+                        help='Membrane potential reg weight (0=disabled, v5: 0.02)')
+    parser.add_argument('--target_fr_min', type=float, default=0.10,
+                        help='Min target firing rate')
+
+    # Dev preset (tiny model, small data, rapid iteration ~1min/epoch)
+    parser.add_argument('--dev', action='store_true',
+                        help='Dev: tiny model, 10 epochs, 5K samples, bs=32')
+
+    # Quick test preset (tiny model, moderate data)
+    parser.add_argument('--quick_test', action='store_true',
+                        help='Quick test: tiny model, 10 epochs, 10K samples')
+
+    # Full training preset (narrow model, full data)
+    parser.add_argument('--full', action='store_true',
+                        help='Full training: narrow model (6.7M), full 151K data')
+
     # System
     parser.add_argument('--num_workers', type=int, default=4,
                         help='CUDA: 4 workers for data loading')
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--use_amp', action='store_true', default=True,
-                        help='Use Automatic Mixed Precision')
-    parser.add_argument('--no_amp', action='store_true',
-                        help='Disable AMP')
 
     # Early stopping
     parser.add_argument('--early_stop_patience', type=int, default=15,
@@ -108,11 +124,60 @@ def get_args():
 
     args = parser.parse_args()
 
+    # Apply dev preset
+    if args.dev:
+        args.model_size = 'tiny'
+        args.T = 2
+        args.epochs = 10
+        args.batch_size = 32
+        args.max_train_samples = 5000
+        args.max_val_samples = 2000
+        args.warmup_epochs = 2
+        args.early_stop_patience = 0
+        args.save_every = 0
+        args.lambda_sd = 0.5
+        args.lambda_mp = 0.02
+        args.log_csv = './logs/hasyv2_dev.csv'
+        print("🔧 Dev: tiny model, 10 epochs, 5K train, bs=32, reg v5")
+
+    # Apply quick_test preset
+    if args.quick_test:
+        args.model_size = 'tiny'
+        args.T = 2
+        args.epochs = 10
+        args.batch_size = 16
+        args.max_train_samples = 10000
+        args.max_val_samples = 2000
+        args.warmup_epochs = 2
+        args.early_stop_patience = 0
+        args.save_every = 0
+        args.lambda_sd = 0.5
+        args.lambda_mp = 0.02
+        args.log_csv = './logs/hasyv2_tiny_test.csv'
+        print("🧪 Quick test: tiny model, 10 epochs, 10K train, reg v5")
+
+    # Apply full training preset
+    if args.full:
+        args.model_size = 'narrow'
+        args.T = 3
+        args.epochs = 50
+        args.batch_size = 16
+        args.max_train_samples = 0      # all 151K
+        args.max_val_samples = 0
+        args.warmup_epochs = 5
+        args.early_stop_patience = 15
+        args.save_every = 5
+        args.lambda_sd = 0.5
+        args.lambda_mp = 0.02
+        args.log_csv = './logs/hasyv2_cuda_narrow_v5.csv'
+        print("🚀 Full training: narrow model (6.7M), 50 epochs, 151K data, reg v5")
+
     # Compute effective batch
     args.eff_batch = args.batch_size
     print(f"🚀 HASYv2 CUDA: {args.model_size} model, {args.epochs} epochs, "
           f"batch={args.batch_size}, T={args.T}, tau={args.tau}, v_th={args.v_threshold}, "
-          f"min_lr={args.min_lr}, early_stop={args.early_stop_patience}")
+          f"min_lr={args.min_lr}, early_stop={args.early_stop_patience}, "
+          f"reg=(sd={args.lambda_sd}, mp={args.lambda_mp})")
 
     return args
 
@@ -132,8 +197,6 @@ def main():
     print(f"  GPU: {torch.cuda.get_device_name(0)}")
     vram_total = torch.cuda.get_device_properties(0).total_memory / 1e9
     print(f"  VRAM: {vram_total:.1f} GB")
-    use_amp = args.use_amp and not args.no_amp
-    print(f"  AMP: {'enabled' if use_amp else 'disabled'}")
 
     # ---- Data ----
     print("Loading HASYv2...")
@@ -151,7 +214,7 @@ def main():
     # ---- Model ----
     print("Building model...")
     model_map = {
-        'tiny': meta_spikeformer_tiny,
+        'tiny': meta_spikeformer_hasyv2_tiny,
         'narrow': meta_spikeformer_hasyv2_narrow,
         'hasyv2': meta_spikeformer_hasyv2,
     }
@@ -177,11 +240,6 @@ def main():
     if vram_used > vram_limit_mb * 0.5:
         print(f"⚠️ VRAM already high before training, check other processes")
 
-    # ---- AMP ----
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
-    if scaler:
-        print("AMP scaler initialized")
-
     # ---- Monitor ----
     fr_monitor = FiringRateMonitor(model)
     print(f"FR monitor: {len(fr_monitor.hooks)} LIF nodes")
@@ -205,16 +263,19 @@ def main():
     csv_file = open(args.log_csv, 'w') if args.log_csv else None
     batch_records = []
     if csv_file:
-        csv_file.write('epoch,batch,loss,acc,lr,grad_norm,fr\n')
+        csv_file.write('epoch,batch,loss,acc,lr,grad_norm,fr,ce_loss,sd_loss,mp_loss\n')
 
-    def batch_logger(epoch, batch_idx, loss, acc, lr, grad_norm, fr):
+    def batch_logger(epoch, batch_idx, loss, acc, lr, grad_norm, fr,
+                     ce_loss=0.0, sd_loss=0.0, mp_loss=0.0):
         if csv_file:
             csv_file.write(
                 f'{epoch},{batch_idx},{loss:.6f},{acc:.4f},'
-                f'{lr:.8f},{grad_norm:.4f},{fr:.6f}\n')
+                f'{lr:.8f},{grad_norm:.4f},{fr:.6f},'
+                f'{ce_loss:.6f},{sd_loss:.6f},{mp_loss:.6f}\n')
         batch_records.append({
             'epoch': epoch, 'batch': batch_idx, 'loss': loss,
-            'acc': acc, 'lr': lr, 'grad_norm': grad_norm, 'fr': fr})
+            'acc': acc, 'lr': lr, 'grad_norm': grad_norm, 'fr': fr,
+            'ce_loss': ce_loss, 'sd_loss': sd_loss, 'mp_loss': mp_loss})
 
     # ---- Resume ----
     start_epoch, best_acc = 0, 0.0
@@ -243,7 +304,9 @@ def main():
             model, train_loader, optimizer, criterion, device, epoch + 1,
             grad_clip=args.grad_clip, fr_monitor=fr_monitor, dry_run=False,
             batch_logger=batch_logger if csv_file else None,
-            grad_accum_steps=1)
+            grad_accum_steps=1,
+            lambda_sd=args.lambda_sd, lambda_mp=args.lambda_mp,
+            target_fr_min=args.target_fr_min)
 
         # Eval
         val_metrics = evaluate(model, val_loader, criterion, device,
@@ -259,7 +322,6 @@ def main():
 
         # VRAM check
         vram_mb = torch.cuda.memory_allocated() / 1e6
-        vram_pct = vram_mb / vram_limit_mb * 100
         vram_warn = ""
         if vram_mb > vram_limit_mb:
             vram_warn = f" ⚠️VRAM {vram_mb:.0f}MB > {vram_limit_mb}MB LIMIT!"
@@ -285,11 +347,17 @@ def main():
         elif avg_fr < 0.05:
             fr_health_str = " ⚠️FR LOW"
 
+        reg_str = ""
+        if args.lambda_sd > 0 or args.lambda_mp > 0:
+            reg_str = (f" | Reg(CE:{train_metrics.get('ce_loss', 0):.3f} "
+                       f"SD:{train_metrics.get('sd_loss', 0):.4f} "
+                       f"MP:{train_metrics.get('mp_loss', 0):.4f})")
         print(f"Epoch {epoch+1:3d}/{args.epochs} | LR: {current_lr:.6f} | "
               f"Train: {train_metrics['loss']:.4f} {train_metrics['acc']:.2f}% | "
               f"Val: {val_metrics['loss']:.4f} {val_metrics['acc']:.2f}% | "
               f"FR: {avg_fr:.4f}{fr_health_str}{health_str} | SOPs: {sops:.2f}M | "
-              f"VRAM: {vram_mb:.0f}MB{vram_warn} | Time: {epoch_time:.0f}s {'*' if is_best else ''}")
+              f"VRAM: {vram_mb:.0f}MB{vram_warn} | Time: {epoch_time:.0f}s"
+              f"{reg_str} {'*' if is_best else ''}")
 
         # Early stopping
         if is_best:
