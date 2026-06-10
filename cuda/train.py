@@ -59,6 +59,8 @@ def get_args():
     # Training
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--grad_accum_steps', type=int, default=1,
+                        help='Gradient accumulation steps (effective batch = batch_size × this)')
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=0.05)
     parser.add_argument('--min_lr', type=float, default=1e-5)
@@ -67,6 +69,10 @@ def get_args():
     parser.add_argument('--max_train_samples', type=int, default=0,
                         help='0=use all CIFAR-100 (50000)')
     parser.add_argument('--max_val_samples', type=int, default=0)
+    parser.add_argument('--early_stop_patience', type=int, default=0,
+                        help='Early stopping patience (0=disabled). Stops if val acc not improving for N epochs.')
+    parser.add_argument('--early_stop_min_delta', type=float, default=0.1,
+                        help='Minimum improvement to reset patience counter')
 
     # System
     parser.add_argument('--num_workers', type=int, default=4,
@@ -95,10 +101,17 @@ def get_args():
         print("🚀 Preset 'quick': tiny model, 30 epochs, full data")
     elif args.preset == 'standard':
         args.model_size = 'cifar100'
-        args.epochs = 200
-        args.batch_size = 64
+        args.epochs = 150
+        args.batch_size = 16
+        args.grad_accum_steps = 4
         args.warmup_epochs = 10
-        print("🚀 Preset 'standard': cifar100 model, 200 epochs, full data")
+        args.tau = 4.0
+        args.v_threshold = 0.25
+        args.min_lr = 5e-5
+        args.early_stop_patience = 20
+        eff_bs = args.batch_size * args.grad_accum_steps
+        print(f"🚀 Preset 'standard': cifar100, 150 epochs, tau=4.0, v_th=0.25, "
+              f"batch={args.batch_size}×{args.grad_accum_steps}=eff{eff_bs}, early_stop=20")
 
     return args
 
@@ -114,7 +127,7 @@ def main():
     print(f"Device: {device}")
     if device.type == 'cuda':
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
-        print(f"  VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+        print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
         print(f"  AMP: {'enabled' if args.use_amp and not args.no_amp else 'disabled'}")
 
     # Data
@@ -197,8 +210,19 @@ def main():
         best_acc = ckpt.get('best_acc', 0.0)
         print(f"Resumed at epoch {start_epoch}, best_acc={best_acc:.2f}%")
 
+    # Early stopping state
+    early_stop_counter = 0
+    early_stop_best_acc = best_acc
+    early_stop_best_epoch = start_epoch
+    best_model_path = str(Path(args.save_dir) / f'{args.model_size}_best_cuda.pt')
+
     # Training loop
-    print(f"\n=== Training ({args.epochs} epochs, batch={args.batch_size}) ===")
+    eff_bs = args.batch_size * args.grad_accum_steps
+    accum_info = f", grad_accum={args.grad_accum_steps}→eff_bs={eff_bs}" if args.grad_accum_steps > 1 else ""
+    es_info = f", early_stop={args.early_stop_patience}" if args.early_stop_patience > 0 else ""
+    print(f"\n=== Training ({args.epochs} epochs, batch={args.batch_size}{accum_info}{es_info}) ===")
+
+    stopped_early = False
     for epoch in range(start_epoch, args.epochs):
         scheduler.step(epoch)
         current_lr = scheduler.get_lr()
@@ -207,7 +231,8 @@ def main():
         train_metrics = train_one_epoch(
             model, train_loader, optimizer, criterion, device, epoch + 1,
             grad_clip=args.grad_clip, fr_monitor=fr_monitor, dry_run=False,
-            batch_logger=batch_logger if csv_file else None)
+            batch_logger=batch_logger if csv_file else None,
+            grad_accum_steps=args.grad_accum_steps)
 
         val_metrics = evaluate(model, val_loader, criterion, device, fr_monitor=fr_monitor)
         epoch_time = time.time() - t0
@@ -216,26 +241,65 @@ def main():
         sops = estimate_sops(model, avg_fr, T=args.T)
         fr_monitor.clear()
 
-        is_best = val_metrics['acc'] > best_acc
+        # FR health check
+        fr_warn = ""
+        if avg_fr < 0.05:
+            fr_warn = " ⚠️FR LOW! Neurons dying!"
+        elif avg_fr < 0.08:
+            fr_warn = " ⚠️FR declining"
+
+        is_best = val_metrics['acc'] > best_acc + args.early_stop_min_delta / 100.0
         if is_best:
             best_acc = val_metrics['acc']
             save_checkpoint(model, optimizer, scheduler, epoch, best_acc, val_metrics,
-                          str(Path(args.save_dir) / f'{args.model_size}_best_cuda.pt'))
+                          best_model_path)
             print(f"  → Best saved ({best_acc:.2f}%)")
+
+            # Early stopping: significant improvement resets counter
+            if args.early_stop_patience > 0 and val_metrics['acc'] > early_stop_best_acc + args.early_stop_min_delta / 100.0:
+                early_stop_best_acc = val_metrics['acc']
+                early_stop_best_epoch = epoch
+                early_stop_counter = 0
+        elif args.early_stop_patience > 0:
+            early_stop_counter += 1
 
         print(f"Epoch {epoch+1:3d}/{args.epochs} | LR: {current_lr:.6f} | "
               f"Train: {train_metrics['loss']:.4f} {train_metrics['acc']:.2f}% | "
               f"Val: {val_metrics['loss']:.4f} {val_metrics['acc']:.2f}% | "
-              f"FR: {avg_fr:.4f} | SOPs: {sops:.2f}M | Time: {epoch_time:.0f}s {'*' if is_best else ''}")
+              f"FR: {avg_fr:.4f}{fr_warn} | SOPs: {sops:.2f}M | Time: {epoch_time:.0f}s {'*' if is_best else ''}")
 
         if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
             save_checkpoint(model, optimizer, scheduler, epoch, best_acc, val_metrics,
                           str(Path(args.save_dir) / f'{args.model_size}_epoch{epoch+1}_cuda.pt'))
 
-    print(f"\n=== Done ===")
+        # Early stopping check
+        if args.early_stop_patience > 0 and early_stop_counter >= args.early_stop_patience:
+            print(f"\n⏹ Early stopping triggered after {early_stop_counter} epochs without improvement "
+                  f"(best val acc: {best_acc:.2f}% at epoch {early_stop_best_epoch+1})")
+            print(f"Restoring best model weights from {best_model_path}")
+            ckpt = torch.load(best_model_path, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt['model_state_dict'])
+            stopped_early = True
+            break
+
+        # Auto-stop if FR collapses
+        if avg_fr < 0.03 and epoch > args.warmup_epochs:
+            print(f"\n💀 FR collapsed to {avg_fr:.4f} — stopping to prevent model death")
+            print(f"Restoring best model from epoch {early_stop_best_epoch+1} (val acc: {best_acc:.2f}%)")
+            ckpt = torch.load(best_model_path, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt['model_state_dict'])
+            stopped_early = True
+            break
+
+    if stopped_early:
+        print(f"\n=== Training stopped early ===")
+    else:
+        print(f"\n=== Done ===")
     print(f"Best Val Acc: {best_acc:.2f}%")
 
-    save_checkpoint(model, optimizer, scheduler, args.epochs - 1, best_acc, {},
+    save_checkpoint(model, optimizer, scheduler,
+                  early_stop_best_epoch if stopped_early else args.epochs - 1,
+                  best_acc, {},
                   str(Path(args.save_dir) / f'{args.model_size}_final_cuda.pt'))
 
     if csv_file:

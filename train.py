@@ -240,12 +240,30 @@ def train_one_epoch(
     fr_monitor: Optional[FiringRateMonitor] = None,
     dry_run: bool = False,
     batch_logger = None,  # callback(epoch, batch_idx, loss, acc, lr, grad_norm, fr)
+    grad_accum_steps: int = 1,  # gradient accumulation steps
 ) -> Dict[str, float]:
+    """
+    Train one epoch with optional gradient accumulation.
+
+    When grad_accum_steps > 1, gradients are accumulated over that many
+    micro-batches before calling optimizer.step().  This simulates a larger
+    effective batch size without the VRAM cost:
+        effective_batch = batch_size × grad_accum_steps
+
+    Loss is scaled by 1/grad_accum_steps so the gradient magnitude matches
+    the effective batch size.
+    """
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
     current_lr = optimizer.param_groups[0]['lr']
+    accum_step = 0
+    total_norm = 0.0
+    n_batches = len(loader)
+
+    # Zero grad at start of epoch
+    optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, (images, labels) in enumerate(loader):
         images = images.to(device, non_blocking=True)
@@ -255,41 +273,55 @@ def train_one_epoch(
         if images.dim() == 4:
             images = images.unsqueeze(0).repeat(model.T, 1, 1, 1, 1)
 
-        optimizer.zero_grad(set_to_none=True)
-
-        # Forward
+        # Forward — scale loss for gradient accumulation
         logits = model(images)
-        loss = criterion(logits, labels)
+        loss = criterion(logits, labels) / grad_accum_steps
 
-        # Backward
+        # Backward (accumulate gradients)
         loss.backward()
-
-        # Gradient norm before clipping
-        total_norm = 0.0
-        if grad_clip > 0:
-            total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item()
-        else:
-            total_norm = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
-
-        optimizer.step()
 
         # CRITICAL: reset network state after EVERY forward pass
         functional.reset_net(model)
 
-        # Stats
-        running_loss += loss.item()
+        # Stats (use unscaled loss for reporting)
+        running_loss += loss.item() * grad_accum_steps
         _, predicted = logits.max(1)
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
-        batch_acc = predicted.eq(labels).sum().item() / labels.size(0) * 100.0
+        accum_step += 1
 
-        # Per-batch logging (record FR without clearing)
-        if batch_logger:
-            fr = fr_monitor.get_avg_firing_rate() if fr_monitor else 0.0
-            batch_logger(epoch, batch_idx, loss.item(), batch_acc, current_lr, total_norm, fr)
+        # Optimizer step — only at accumulation boundary or end of epoch
+        is_accum_boundary = (accum_step == grad_accum_steps)
+        is_last_batch = (batch_idx == n_batches - 1)
+
+        if is_accum_boundary or is_last_batch:
+            # Gradient clipping
+            if grad_clip > 0:
+                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item()
+            else:
+                total_norm = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
+
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+            # Per-batch logging (at each optimizer step)
+            if batch_logger:
+                fr = fr_monitor.get_avg_firing_rate() if fr_monitor else 0.0
+                batch_acc_val = predicted.eq(labels).sum().item() / labels.size(0) * 100.0
+                batch_logger(epoch, batch_idx, loss.item() * grad_accum_steps,
+                           batch_acc_val, current_lr, total_norm, fr)
+
+            accum_step = 0
+        else:
+            # Log intermediate micro-batches without optimizer stats
+            if batch_logger:
+                fr = fr_monitor.get_avg_firing_rate() if fr_monitor else 0.0
+                batch_acc_val = predicted.eq(labels).sum().item() / labels.size(0) * 100.0
+                batch_logger(epoch, batch_idx, loss.item() * grad_accum_steps,
+                           batch_acc_val, current_lr, 0.0, fr)
 
         if dry_run and batch_idx == 0:
-            print(f"  Dry-run batch {batch_idx+1}: loss={loss.item():.4f}, "
+            print(f"  Dry-run batch {batch_idx+1}: loss={loss.item() * grad_accum_steps:.4f}, "
                   f"acc={100.0*correct/total:.2f}%")
             print("  Dry-run PASSED — tensor shapes & gradient flow OK.")
             break
@@ -302,14 +334,15 @@ def train_one_epoch(
                 fr_str = f", FR={avg_fr:.4f}"
                 if health:
                     fr_str += f" [{health}]"
-            print(f"  Epoch {epoch} [{batch_idx}/{len(loader)}] "
+            eff_batch = (batch_idx + 1) * images.size(1)  # approximate
+            print(f"  Epoch {epoch} [{batch_idx}/{n_batches}] "
                   f"Loss: {running_loss/(batch_idx+1):.4f}, "
                   f"Acc: {100.0*correct/total:.2f}%{fr_str}")
             if fr_monitor:
                 fr_monitor.clear()
 
     return {
-        'loss': running_loss / len(loader),
+        'loss': running_loss / n_batches,
         'acc': 100.0 * correct / total,
     }
 
