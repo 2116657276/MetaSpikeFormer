@@ -64,17 +64,29 @@ python mac/train.py --model_size tiny --epochs 12 --batch_size 16 \
 
 ### HASYv2 (369 math symbols, grayscale 32×32)
 
-| Run | Model | Data | Epochs | Batch | Best Val | FR trend | Key |
-|-----|-------|------|--------|-------|----------|----------|-----|
-| quick | tiny | 10K | 3 | 16 | 0.70% | 0.25→0.26 | model too small |
-| **half** | **tiny** | **75K** | **20** | **16** | **46.83%** | 0.25→0.034 | 🏆 best on Mac |
-| full (plan) | narrow | 75K | 30 | 16 | TBD | — | efficient 6.7M |
-| full (plan) | hasyv2 | 151K | 40 | 16 | TBD | — | CUDA only |
+| Run | Model | Data | Epochs | Best Val | FR range | Key |
+|-----|-------|------|--------|----------|----------|-----|
+| quick | tiny | 10K | 3 | 0.70% | 0.25→0.26 | model too small |
+| half-v1 | tiny | 75K | 8 | 46.83% | 0.25→0.034 | FR collapse at E8 |
+| **half-v2** | **narrow** | **75K** | **25** | **78.69%** | 0.30→0.11 | 🏆 stable, no collapse |
+
+### HASYv2 v2 最佳参数
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| model_size | narrow | 6.66M, embed=(48,96,192,384), 10 blocks |
+| v_threshold | **0.25** | 高于旧版0.3，保持FR>0.10 |
+| label_smoothing | **0** | 移除FR压制 |
+| weight_decay | **0.02** | 减轻权重衰减 |
+| T | 3 | |
+| batch_size | 16 | |
+| lr | 1e-3 | |
+| warmup_epochs | 3 | |
+| early_stop | 10 | |
 
 **Best command:**
 ```bash
 python mac/train_hasyv2.py --preset half
-# tiny model, 75K samples, 20 epochs, T=3
 ```
 
 ## Quick Start
