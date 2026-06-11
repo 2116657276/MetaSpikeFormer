@@ -67,7 +67,7 @@ class FiringRateMonitor:
             return hook
 
         for name, module in self.model.named_modules():
-            if isinstance(module, neuron.LIFNode):
+            if isinstance(module, (neuron.LIFNode, neuron.ParametricLIFNode)):
                 h = module.register_forward_hook(make_hook())
                 self.hooks.append(h)
 
@@ -97,54 +97,62 @@ class FiringRateMonitor:
 
 
 # ---------------------------------------------------------------------------
-#  Spike Regularization Loss (prevent dead / bursting neurons)
+#  Membrane Potential Regularization (V-based — differentiable, no surrogate)
 # ---------------------------------------------------------------------------
 
-def compute_spike_reg_loss(
+def compute_v_reg_loss(
     model: nn.Module,
     target_fr_min: float = 0.10,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute spike + membrane potential regularization loss.
+    V-based firing health regularization.
 
-    - sd_loss: penalises FR below target_fr_min (differentiable via surrogate).
-    - mp_loss: penalises negative membrane potential (prevents neuron death).
+    Uses .v (membrane potential) — continuous & differentiable.
+    Gradient flows directly to weights, no surrogate gradient needed.
 
-    Returns (sd_loss, mp_loss) as scalar tensors.
+    - v_low_loss:  penalises layers where mean V < 30% of threshold (dead).
+    - v_neg_loss:  penalises negative V (frozen/dying neurons).
+
+    Returns (v_low_loss, v_neg_loss) as scalar tensors.
     """
-    mp_loss = None
-    sd_loss = None
+    v_low_loss = None
+    v_neg_loss = None
     lif_count = 0
 
     for m in model.modules():
-        if not isinstance(m, neuron.LIFNode):
+        if not isinstance(m, (neuron.LIFNode, neuron.ParametricLIFNode)):
             continue
         lif_count += 1
 
-        # Membrane potential — differentiable, guides V toward healthy range
         if hasattr(m, 'v') and m.v is not None:
-            term = (torch.relu(-m.v) ** 2).mean()  # punish V < 0
-            mp_loss = term if mp_loss is None else mp_loss + term
+            v = m.v.float()                          # [T, B, N, C]
+            v_mean = v.mean()
 
-        # Spike density — differentiable via surrogate gradient (ATan)
-        if hasattr(m, 'spike') and m.spike is not None:
-            spike_mean = m.spike.float().mean()               # gradient flows!
-            if spike_mean < target_fr_min:
-                term = (target_fr_min - spike_mean) ** 2
-                sd_loss = term if sd_loss is None else sd_loss + term
+            # Read the actual threshold for this layer (PLIF may have per-neuron v_th)
+            v_th = getattr(m, 'v_threshold', 0.15)
+            if hasattr(v_th, 'mean'):
+                v_th = v_th.mean().detach()
 
-    # Fallback for no LIF nodes
-    if mp_loss is None:
-        mp_loss = torch.tensor(0.0)
-    if sd_loss is None:
-        sd_loss = torch.tensor(0.0)
+            # Target: mean V should be at least 30% of threshold for healthy firing
+            v_min_healthy = v_th * 0.3
+
+            if v_mean < v_min_healthy:
+                term = (v_min_healthy - v_mean) ** 2
+                v_low_loss = term if v_low_loss is None else v_low_loss + term
+
+            # Penalise negative V (neurons stuck below 0 can never fire)
+            neg_penalty = torch.relu(-v).mean()
+            v_neg_loss = neg_penalty if v_neg_loss is None else v_neg_loss + neg_penalty
+
+    if v_low_loss is None:
+        v_low_loss = torch.tensor(0.0)
+    if v_neg_loss is None:
+        v_neg_loss = torch.tensor(0.0)
 
     if lif_count > 0:
-        mp_loss = mp_loss / lif_count
-        # sd_loss is summed across layers, NOT averaged — each dead layer
-        # must contribute directly to the gradient (v6: fix dilution)
+        v_low_loss = v_low_loss / lif_count
 
-    return sd_loss, mp_loss
+    return v_low_loss, v_neg_loss
 
 
 # ---------------------------------------------------------------------------
@@ -305,15 +313,15 @@ def train_one_epoch(
         effective_batch = batch_size × grad_accum_steps
 
     Spike regularization (when lambda_sd > 0 or lambda_mp > 0):
-    - Membrane potential loss: pushes V toward target_v (prevents saturation).
-    - Spike density loss: penalises FR outside [target_fr_min, target_fr_max].
+    - v_low_loss: penalises low V (near-zero = dead neuron). Differentiable via V.
+    - v_neg_loss: penalises negative V (frozen neurons).
     """
     model.train()
     use_reg = (lambda_sd > 0 or lambda_mp > 0)
     running_loss = 0.0
     running_ce = 0.0
-    running_sd = 0.0
-    running_mp = 0.0
+    running_v_low = 0.0
+    running_v_neg = 0.0
     correct = 0
     total = 0
     current_lr = optimizer.param_groups[0]['lr']
@@ -336,15 +344,14 @@ def train_one_epoch(
         logits = model(images)
         ce_loss = criterion(logits, labels)
 
-        # Spike regularization (computed BEFORE reset_net — needs v/spike state)
-        sd_loss = torch.tensor(0.0, device=device)
-        mp_loss = torch.tensor(0.0, device=device)
+        # V-based regularization (computed BEFORE reset_net — needs V state)
+        v_low_loss = torch.tensor(0.0, device=device)
+        v_neg_loss = torch.tensor(0.0, device=device)
         if use_reg:
-            sd_loss, mp_loss = compute_spike_reg_loss(
+            v_low_loss, v_neg_loss = compute_v_reg_loss(
                 model, target_fr_min=target_fr_min)
-            # mp_loss flows gradients through V; sd_loss is detached inside
 
-        loss = (ce_loss + lambda_sd * sd_loss.to(device) + lambda_mp * mp_loss.to(device)) / grad_accum_steps
+        loss = (ce_loss + lambda_sd * v_low_loss.to(device) + lambda_mp * v_neg_loss.to(device)) / grad_accum_steps
 
         # Backward (accumulate gradients)
         loss.backward()
@@ -356,8 +363,8 @@ def train_one_epoch(
         running_loss += loss.item() * grad_accum_steps
         running_ce += ce_loss.item()
         if use_reg:
-            running_sd += sd_loss.item()
-            running_mp += mp_loss.item()
+            running_v_low += v_low_loss.item()
+            running_v_neg += v_neg_loss.item()
         _, predicted = logits.max(1)
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
@@ -384,8 +391,8 @@ def train_one_epoch(
                 batch_logger(epoch, batch_idx, loss.item() * grad_accum_steps,
                            batch_acc_val, current_lr, total_norm, fr,
                            ce_loss=ce_loss.item(),
-                           sd_loss=sd_loss.item(),
-                           mp_loss=mp_loss.item())
+                           sd_loss=v_low_loss.item(),
+                           mp_loss=v_neg_loss.item())
 
             accum_step = 0
         else:
@@ -396,8 +403,8 @@ def train_one_epoch(
                 batch_logger(epoch, batch_idx, loss.item() * grad_accum_steps,
                            batch_acc_val, current_lr, 0.0, fr,
                            ce_loss=ce_loss.item(),
-                           sd_loss=sd_loss.item(),
-                           mp_loss=mp_loss.item())
+                           sd_loss=v_low_loss.item(),
+                           mp_loss=v_neg_loss.item())
 
         if dry_run and batch_idx == 0:
             print(f"  Dry-run batch {batch_idx+1}: loss={loss.item() * grad_accum_steps:.4f}, "
@@ -424,8 +431,8 @@ def train_one_epoch(
         'loss': running_loss / n_batches,
         'acc': 100.0 * correct / total,
         'ce_loss': running_ce / n_batches,
-        'sd_loss': running_sd / n_batches,
-        'mp_loss': running_mp / n_batches,
+        'v_low_loss': running_v_low / n_batches,
+        'v_neg_loss': running_v_neg / n_batches,
     }
 
 

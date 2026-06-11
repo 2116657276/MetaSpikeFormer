@@ -32,12 +32,30 @@ from spikingjelly.activation_based import neuron, surrogate, functional, layer
 #  Helper: build a LIF node with the paper-recommended settings
 # ---------------------------------------------------------------------------
 
+def _plif(
+    step_mode: str = 'm',
+    tau: float = 2.0,
+    v_threshold: float = 1.0,
+) -> neuron.ParametricLIFNode:
+    """Return a ParametricLIFNode with ATan surrogate — learnable tau & v_th."""
+    return neuron.ParametricLIFNode(
+        surrogate_function=surrogate.ATan(),
+        v_reset=0.0,
+        step_mode=step_mode,
+        init_tau=tau,
+        v_threshold=v_threshold,
+    )
+
+
 def _lif(
     step_mode: str = 'm',
     tau: float = 2.0,
     v_threshold: float = 1.0,
+    use_plif: bool = False,
 ) -> neuron.LIFNode:
-    """Return a LIFNode with ATan surrogate gradient and v_reset=0.0."""
+    """Return a LIFNode (or ParametricLIFNode if use_plif) with ATan surrogate."""
+    if use_plif:
+        return _plif(step_mode, tau, v_threshold)
     return neuron.LIFNode(
         surrogate_function=surrogate.ATan(),
         v_reset=0.0,
@@ -101,6 +119,7 @@ class SDSA(nn.Module):
         tau: float = 2.0,
         v_threshold: float = 1.0,
         use_groupnorm: bool = True,
+        use_plif: bool = False,
     ):
         super().__init__()
         assert dim % num_heads == 0, f"dim {dim} must be divisible by num_heads {num_heads}"
@@ -120,9 +139,9 @@ class SDSA(nn.Module):
         self.k_norm = _norm(dim, use_groupnorm)
         self.v_norm = _norm(dim, use_groupnorm)
 
-        self.q_lif = _lif('m', tau, v_threshold)
-        self.k_lif = _lif('m', tau, v_threshold)
-        self.v_lif = _lif('m', tau, v_threshold)
+        self.q_lif = _lif('m', tau, v_threshold, use_plif=use_plif)
+        self.k_lif = _lif('m', tau, v_threshold, use_plif=use_plif)
+        self.v_lif = _lif('m', tau, v_threshold, use_plif=use_plif)
 
         # Spatial reduction (optional, like PVT)
         if sr_ratio > 1:
@@ -242,15 +261,16 @@ class SpikeMLP(nn.Module):
         tau: float = 2.0,
         v_threshold: float = 1.0,
         use_groupnorm: bool = True,
+        use_plif: bool = False,
     ):
         super().__init__()
         self.use_groupnorm = use_groupnorm
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.norm1 = _norm(hidden_features, use_groupnorm)
-        self.lif1 = _lif('m', tau, v_threshold)
+        self.lif1 = _lif('m', tau, v_threshold, use_plif=use_plif)
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.norm2 = _norm(out_features, use_groupnorm)
-        self.lif2 = _lif('m', tau, v_threshold)
+        self.lif2 = _lif('m', tau, v_threshold, use_plif=use_plif)
         self.drop = nn.Dropout(drop) if drop > 0 else nn.Identity()
 
     def forward(self, x: torch.Tensor):
@@ -304,16 +324,19 @@ class MetaSpikeBlock(nn.Module):
         tau: float = 2.0,
         v_threshold: float = 1.0,
         use_groupnorm: bool = True,
+        use_plif: bool = False,
     ):
         super().__init__()
         self.use_groupnorm = use_groupnorm
         self.norm1 = _norm(dim, use_groupnorm)
         self.sdsa = SDSA(dim, num_heads, sr_ratio, attn_drop, drop,
-                         tau=tau, v_threshold=v_threshold, use_groupnorm=use_groupnorm)
+                         tau=tau, v_threshold=v_threshold, use_groupnorm=use_groupnorm,
+                         use_plif=use_plif)
         self.norm2 = _norm(dim, use_groupnorm)
         mlp_hidden = int(dim * mlp_ratio)
         self.mlp = SpikeMLP(dim, mlp_hidden, dim, drop,
-                            tau=tau, v_threshold=v_threshold, use_groupnorm=use_groupnorm)
+                            tau=tau, v_threshold=v_threshold, use_groupnorm=use_groupnorm,
+                            use_plif=use_plif)
 
     def forward(self, x: torch.Tensor, H: int, W: int):
         """
@@ -359,11 +382,12 @@ class SPS(nn.Module):
     effective batch size (T*B*H*W samples per channel).
     """
 
-    def __init__(self, in_dim: int, out_dim: int, tau: float = 2.0, v_threshold: float = 1.0):
+    def __init__(self, in_dim: int, out_dim: int, tau: float = 2.0, v_threshold: float = 1.0,
+                 use_plif: bool = False):
         super().__init__()
         self.conv = nn.Conv2d(in_dim, out_dim, kernel_size=3, stride=2, padding=1)
         self.bn = nn.BatchNorm2d(out_dim)
-        self.lif = _lif('m', tau, v_threshold)
+        self.lif = _lif('m', tau, v_threshold, use_plif=use_plif)
 
     def forward(self, x: torch.Tensor, H: int, W: int) -> Tuple[torch.Tensor, int, int]:
         """
@@ -422,6 +446,7 @@ class MetaSpikeFormer(nn.Module):
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
         use_groupnorm: bool = True,
+        use_plif: bool = False,
     ):
         super().__init__()
         self.T = T
@@ -434,7 +459,7 @@ class MetaSpikeFormer(nn.Module):
         self.patch_embed = nn.Conv2d(in_channels, embed_dims[0],
                                       kernel_size=3, stride=1, padding=1)
         self.patch_bn = nn.BatchNorm2d(embed_dims[0])
-        self.patch_lif = _lif('m', tau, v_threshold)
+        self.patch_lif = _lif('m', tau, v_threshold, use_plif=use_plif)
 
         # ---- Stages ----
         self.stages = nn.ModuleList()
@@ -444,7 +469,8 @@ class MetaSpikeFormer(nn.Module):
         for i in range(self.num_stages):
             # SPS down-sample (except first stage where we already have tokens)
             if i > 0:
-                sps = SPS(in_dim, embed_dims[i], tau=tau, v_threshold=v_threshold)
+                sps = SPS(in_dim, embed_dims[i], tau=tau, v_threshold=v_threshold,
+                          use_plif=use_plif)
                 self.sps_modules.append(sps)
                 in_dim = embed_dims[i]
 
@@ -460,6 +486,7 @@ class MetaSpikeFormer(nn.Module):
                     tau=tau,
                     v_threshold=v_threshold,
                     use_groupnorm=use_groupnorm,
+                    use_plif=use_plif,
                 )
                 for _ in range(depths[i])
             ])
@@ -621,7 +648,31 @@ def meta_spikeformer_hasyv2_narrow(**kwargs) -> MetaSpikeFormer:
         mlp_ratios=(4.0, 4.0, 4.0, 4.0),
         T=3, tau=2.0, v_threshold=0.3,
         drop_rate=0.1, attn_drop_rate=0.1,
-        use_groupnorm=True,
+        use_groupnorm=True, use_plif=False,
+    )
+    defaults.update(kwargs)
+    return MetaSpikeFormer(**defaults)
+
+
+def meta_spikeformer_hasyv2_shallow(**kwargs) -> MetaSpikeFormer:
+    """
+    HASYv2 shallow: ~2.8M params, 3 stages (7 blocks), PLIF neurons.
+
+    Optimized for FR stability:
+      - 3 stages (vs 4 in narrow) → deepest layer through only 2 SPS modules
+      - PLIF neurons with learnable tau/v_th → network self-regulates firing
+      - ~45 LIF nodes (vs 64 in narrow)
+      - v_th=0.20 (between Mac 0.25 and CUDA 0.15 extremes)
+    """
+    defaults = dict(
+        img_size=32, in_channels=1, num_classes=369,
+        embed_dims=(48, 128, 256),
+        depths=(2, 3, 2),
+        num_heads=(4, 8, 16),
+        mlp_ratios=(4.0, 4.0, 4.0),
+        T=3, tau=2.0, v_threshold=0.20,
+        drop_rate=0.05, attn_drop_rate=0.1,
+        use_groupnorm=True, use_plif=True,
     )
     defaults.update(kwargs)
     return MetaSpikeFormer(**defaults)
