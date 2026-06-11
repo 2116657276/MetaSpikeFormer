@@ -639,16 +639,16 @@ def meta_spikeformer_hasyv2_tiny(**kwargs) -> MetaSpikeFormer:
 
 
 def meta_spikeformer_hasyv2_narrow(**kwargs) -> MetaSpikeFormer:
-    """HASYv2 narrow: ~6.7M params. Efficient for Mac MPS, 10 blocks."""
+    """HASYv2 narrow: ~6.7M params, 10 blocks, PLIF neurons."""
     defaults = dict(
         img_size=32, in_channels=1, num_classes=369,
         embed_dims=(48, 96, 192, 384),
         depths=(2, 2, 4, 2),
         num_heads=(4, 8, 16, 24),
         mlp_ratios=(4.0, 4.0, 4.0, 4.0),
-        T=3, tau=2.0, v_threshold=0.3,
+        T=3, tau=2.0, v_threshold=0.25,
         drop_rate=0.1, attn_drop_rate=0.1,
-        use_groupnorm=True, use_plif=False,
+        use_groupnorm=True, use_plif=True,
     )
     defaults.update(kwargs)
     return MetaSpikeFormer(**defaults)
