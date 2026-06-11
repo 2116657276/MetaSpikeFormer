@@ -45,7 +45,7 @@ from model import (
     meta_spikeformer_hasyv2,
     meta_spikeformer_hasyv2_narrow,
 )
-from dataset_hasyv2 import build_hasyv2, HASYV2_NUM_CLASSES
+from dataset_hasyv2 import build_hasyv2
 from train import (
     train_one_epoch, evaluate, FiringRateMonitor, estimate_sops,
     estimate_memory, save_checkpoint, load_checkpoint,
@@ -124,8 +124,10 @@ def get_args():
     parser.add_argument('--max_train_samples', type=int, default=0,
                         help='0=use all available (150K)')
     parser.add_argument('--max_val_samples', type=int, default=0)
-    parser.add_argument('--val_split', type=float, default=0.10,
-                        help='[deprecated] HASYv2 uses fold-1 split')
+    parser.add_argument('--val_user_frac', type=float, default=0.15,
+                        help='Fraction of users reserved for validation')
+    parser.add_argument('--label_smoothing', type=float, default=0.1,
+                        help='Label smoothing epsilon (0=disabled)')
 
     # System
     parser.add_argument('--num_workers', type=int, default=0,
@@ -167,14 +169,17 @@ def get_args():
         print("🚀 quick: tiny, 5 epochs, 10K samples")
     elif args.preset == 'half':
         args.model_size = 'narrow'
-        args.epochs = 30
+        args.epochs = 25
         args.batch_size = 16
         args.max_train_samples = 75000
         args.max_val_samples = 15000
         args.warmup_epochs = 3
         args.T = 3
-        args.early_stop = 8
-        print("🚀 half: narrow (6.7M), 30 epochs, 75K samples, early_stop=8")
+        args.early_stop = 10
+        args.v_threshold = 0.25
+        args.label_smoothing = 0.0
+        args.weight_decay = 0.02
+        print("🚀 half v2: narrow, batch=16, v_th=0.25, no label_smooth, wd=0.02")
     elif args.preset == 'full':
         args.model_size = 'hasyv2'
         args.epochs = 40
@@ -213,6 +218,7 @@ def main():
         root=args.data_root,
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
+        val_user_frac=args.val_user_frac,
     )
     print(f"Classes: {num_classes}, Train batches: {len(train_loader)}, "
           f"Val batches: {len(val_loader)}")
@@ -231,7 +237,8 @@ def main():
     scheduler = WarmupCosineScheduler(
         optimizer, warmup_epochs=args.warmup_epochs, total_epochs=args.epochs,
         base_lr=args.lr, min_lr=args.min_lr)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+    print(f"Label smoothing: {args.label_smoothing}")
 
     # ---- Save dir ----
     save_dir = Path(args.save_dir)
