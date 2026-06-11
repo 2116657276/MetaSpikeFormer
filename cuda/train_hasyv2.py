@@ -54,7 +54,7 @@ def get_args():
     parser.add_argument('--half', action='store_true',
                         help='Half: shallow PLIF, 75K/25ep, ~9 h')
     parser.add_argument('--narrow', action='store_true',
-                        help='Narrow PLIF: narrow 6.7M, 75K/25ep, T=2')
+                        help='Narrow PLIF: narrow 6.7M, 75K/25ep, T=3')
 
     # ---- Model ----
     parser.add_argument('--model_size', type=str, default='shallow',
@@ -126,14 +126,14 @@ def get_args():
 
     if args.narrow:
         args.model_size = 'narrow'
-        args.T = 2                     # VRAM: T=2 stays <6GB on narrow
+        args.T = 3                     # T=3: spikes propagate through all 10 blocks
         args.epochs = 25
         args.max_train_samples = 75000
         args.max_val_samples = 0
         args.save_every = 5
         args.early_stop_patience = 10
         args.log_csv = './logs/hasyv2_narrow_plif.csv'
-        print("🚀 Narrow: narrow PLIF 6.7M, 75K train, 25 epochs, T=2")
+        print("🚀 Narrow: narrow PLIF 6.7M, 75K train, 25 epochs, T=3")
 
     return args
 
