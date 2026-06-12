@@ -77,6 +77,8 @@ def get_args():
     parser.add_argument('--max_train_samples', type=int, default=0,
                         help='0=use all available')
     parser.add_argument('--max_val_samples', type=int, default=0)
+    parser.add_argument('--val_user_frac', type=float, default=0.15,
+                        help='Fraction of users reserved for validation (default 15%%)')
 
     # ---- V-based regularization (lightweight — only activates when V drops) ----
     parser.add_argument('--lambda_v', type=float, default=0.3,
@@ -128,6 +130,7 @@ def get_args():
         args.model_size = 'narrow'
         args.T = 3                     # T=3: spikes propagate through all 10 blocks
         args.epochs = 25
+        args.batch_size = 16            # bs=16: VRAM ~7.3GB, under 7.5GB limit
         args.max_train_samples = 75000
         args.max_val_samples = 0
         args.save_every = 5
@@ -151,7 +154,7 @@ def main():
         raise RuntimeError("CUDA not available!")
     print(f"Device: {device} — {torch.cuda.get_device_name(0)}")
     vram_total = torch.cuda.get_device_properties(0).total_memory / 1e9
-    print(f"VRAM: {vram_total:.1f} GB | limit: 6GB")
+    print(f"VRAM: {vram_total:.1f} GB | limit: 7.5GB")
 
     # ---- Data ----
     print("Loading HASYv2...")
@@ -162,6 +165,7 @@ def main():
         root=args.data_root,
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
+        val_user_frac=args.val_user_frac,
     )
     print(f"{num_classes} classes | Train: {len(train_loader)} batches | Val: {len(val_loader)} batches")
 
@@ -186,7 +190,7 @@ def main():
 
     # ---- VRAM pre-check ----
     vram_mb = torch.cuda.memory_allocated() / 1e6
-    vram_limit_mb = 6000
+    vram_limit_mb = 7500
     if vram_mb > vram_limit_mb:
         raise RuntimeError(f"VRAM {vram_mb:.0f}MB exceeds {vram_limit_mb}MB limit!")
     print(f"VRAM after model load: {vram_mb:.0f}MB")
